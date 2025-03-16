@@ -1,11 +1,323 @@
 ---
-import Welcome from '../components/Welcome.astro';
-import Layout from '../layouts/Layout.astro';
-
-// Welcome to Astro! Wondering what to do next? Check out the Astro documentation at https://docs.astro.build
-// Don't want to use any of this? Delete everything in this file, the `assets`, `components`, and `layouts` directories, and start fresh.
+import Layout from "../layouts/Layout.astro"
 ---
 
+<script>
+    // The constant values:
+    const CONTRACT = "0x78eD9A576519024357aB06D9834266a04c9634b7"
+    const DEPLOY_TIME = 1742056124722
+    const ONE_DAY = 24 * 60 * 60 * 1000
+
+    // The UI elements:
+    const button = document.getElementById("button") as HTMLButtonElement
+    const wallet = document.getElementById("wallet") as HTMLButtonElement
+    const main = document.getElementById("main") as HTMLDivElement
+    const popup = document.getElementById("popup") as HTMLDivElement
+    const container = document.getElementById("container") as HTMLDivElement
+    const minted = document.getElementById("minted") as HTMLParagraphElement
+
+    // The persistent state of the dapp:
+    const state: any = {
+        address: undefined,
+        provider: undefined,
+        intervalId: undefined,
+        totalSupply: undefined,
+    }
+
+    // Request all the available wallets on load:
+    setTimeout(() => {
+        // Listen for self announcements of wallets:
+        window.addEventListener("eip6963:announceProvider", (event: any) => {
+            // Update the UI if there is a wallet:
+            button.disabled = false
+            button.innerText = "Connect"
+
+            // Create a button for that wallet:
+            const clone = wallet.cloneNode(true) as HTMLButtonElement
+
+            // Handle connection if that button is clicked:
+            clone.addEventListener("click", async () => {
+                const address = await connectWallet(event.detail.provider)
+                await switchToMonadTestnet(event.detail.provider)
+                state.address = address
+                state.provider = event.detail.provider
+                clearInterval(state.intervalId)
+
+                // Get the total supply and update the UI:
+                getTotalSupply(event.detail.provider).then((totalSupply) => {
+                    minted.innerText = `${totalSupply} / 1550`
+                    state.totalSupply = parseInt(totalSupply.toString())
+                    if (totalSupply === 1550n) {
+                        button.disabled = true
+                        button.innerText = "All Minted"
+                    }
+                })
+
+                // Handle whitelist information:
+                handleWhitelist(address, event.detail.provider)
+
+                // Listen to account changes:
+                listenAddressChanges(event.detail.provider)
+
+                // Update the UI after that button is clicked:
+                popup.hidden = true
+                main.hidden = false
+            })
+
+            // Update the button:
+            clone.hidden = false
+            clone.innerText = event.detail.info.name
+
+            // Add the button to the UI:
+            container.appendChild(clone)
+        })
+
+        // Request wallets to announce themselves:
+        window.dispatchEvent(new Event("eip6963:requestProvider"))
+    }, 0)
+
+    // The function which handles whitelist information:
+    const handleWhitelist = async (address: string, provider: any) => {
+        const wl = await getWhitelist(provider, address)
+
+        if (wl === "mint") {
+            button.disabled = false
+            button.innerText = "Mint"
+        } else if (wl === "minted") {
+            button.innerText = "Minted"
+        } else {
+            state.intervalId = setInterval(() => {
+                const timeLeft = getTimeLeftUntilPublicPhase()
+                if (!timeLeft) {
+                    clearInterval(state.intervalId)
+                    button.disabled = false
+                    button.innerText = "Mint"
+                } else {
+                    button.innerText = timeLeft
+                }
+            }, 1000)
+        }
+    }
+
+    // The function which connects a wallet:
+    const connectWallet = async (provider: any) => {
+        const addresses = await provider.request({
+            method: "eth_requestAccounts",
+            params: [],
+        })
+
+        return addresses[0] as string
+    }
+
+    // The function which listens to address changes:
+    const listenAddressChanges = async (provider: any) => {
+        const addresses = await provider.on(
+            "accountsChanged",
+            (addresses: any) => {
+                if (!addresses[0]) {
+                    state.provider.off()
+                    button.innerText = "Connect"
+                    button.disabled = false
+                } else {
+                    state.address = addresses[0]
+                    button.innerText = "Loading"
+                    button.disabled = true
+                    handleWhitelist(addresses[0], state.provider)
+                }
+            }
+        )
+    }
+
+    // The function which switches the network to Monad Testnet:
+    const switchToMonadTestnet = async (provider: any) => {
+        const chainId = await provider.request({
+            method: "eth_chainId",
+            params: [],
+        })
+        if (chainId !== "0x279f") {
+            await provider.request({
+                method: "wallet_switchEthereumChain",
+                params: [{ chainId: "0x279f" }],
+            })
+        }
+    }
+
+    // The function which tells if the public mint is live:
+    const getIsPublicLive = () => {
+        return Date.now() > DEPLOY_TIME + ONE_DAY
+    }
+
+    // The function which tells the cost of 1 TheDaks:
+    const getTheDaksCost = () => {
+        return getIsPublicLive() ? 20n : 1n
+    }
+
+    // The function which tells the whitelist information:
+    const getWhitelist = async (provider: any, address: string) => {
+        const result = await provider.request({
+            method: "eth_call",
+            params: [
+                {
+                    to: CONTRACT,
+                    data: `0x30edc0f5000000000000000000000000${address!.slice(2)}`,
+                },
+                "latest",
+            ],
+        })
+
+        return result ===
+            "0x0000000000000000000000000000000000000000000000000000000000000002"
+            ? "minted"
+            : result ===
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ? "mint"
+              : "none"
+    }
+
+    // The function which tells TheDaks total supply:
+    const getTotalSupply = async (provider: any) => {
+        const result = await provider.request({
+            method: "eth_call",
+            params: [
+                {
+                    to: CONTRACT,
+                    data: `0x18160ddd`,
+                },
+                "latest",
+            ],
+        })
+
+        return BigInt(result)
+    }
+
+    // The function which mints TheDaks:
+    const mintTheDaks = async (provider: any) => {
+        try {
+            await provider.request({
+                method: "eth_sendTransaction",
+                params: [
+                    {
+                        to: CONTRACT,
+                        from: state.address,
+                        value:
+                            "0x" + (getTheDaksCost() * 10n ** 18n).toString(16),
+                        data: "0x5517ad70",
+                    },
+                ],
+            })
+            button.innerText = "Minted"
+            button.disabled = true
+        } catch (error: any) {
+            if (error.code === -32603)
+                alert(`You don't have ${getTheDaksCost()} MON.`)
+            console.log(error)
+        }
+    }
+
+    // The function which tells the time left until the public mint:
+    const getTimeLeftUntilPublicPhase = () => {
+        const diffInMs = DEPLOY_TIME + ONE_DAY - Date.now()
+
+        const hours = Math.floor(diffInMs / (1000 * 60 * 60)) // 1000ms * 60s * 60m
+        const minutes = Math.floor((diffInMs % (1000 * 60 * 60)) / (1000 * 60)) // Remaining minutes
+        const seconds = Math.floor((diffInMs % (1000 * 60)) / 1000) // Remaining seconds
+
+        console.log(diffInMs)
+        if (hours > 0) {
+            return `${hours}h ${minutes > 0 ? `${minutes}m` : ""}`
+        } else if (minutes > 0) {
+            return `${minutes}m ${seconds > 0 ? `${seconds}s` : ""}`
+        } else if (seconds > 0) {
+            return `${seconds}s`
+        } else {
+            return
+        }
+    }
+
+    // Handle clicks on the main button:
+    button.addEventListener("click", async () => {
+        switch (button.innerText) {
+            case "Connect": {
+                // Update the UI to show the wallets popup:
+                main.hidden = true
+                popup.hidden = false
+                button.innerText = "Loading"
+                break
+            }
+            case "Mint": {
+                // Say 'aaaaaaaa' on F12 console after minting because it sounds cute:
+                console.log("aaaa")
+                await mintTheDaks(state.provider)
+                minted.innerText = `${state.totalSupply + 1} / 1550`
+                break
+            }
+            case "Minted": {
+                break
+            }
+            case "All Minted": {
+                break
+            }
+            default: {
+                break
+            }
+        }
+    })
+</script>
+
 <Layout>
-	<Welcome />
+    <div
+        class="bg-[url(/background.webp)] bg-no-repeat bg-cover bg-center bg-fixed flex flex-col flex-1"
+    >
+        <div
+            class="bg-white/20 flex-1 backdrop-blur-sm flex items-center justify-center px-5"
+        >
+            <main
+                id="main"
+                class="bg-white/80 backdrop-blur-lg border gap-4 flex flex-col w-full max-w-md border-white px-7 py-6 rounded-3xl"
+            >
+                <h1
+                    class="font-bold text-5xl text-[#200052] text-center leading-none"
+                >
+                    TheDaks
+                </h1>
+                <img src="/5.png" class="rounded-3xl border border-white" />
+                <div class="flex flex-col gap-4">
+                    <p
+                        id="minted"
+                        class="tabular-nums text-xl font-semibold text-[#200052]"
+                    >
+                        ? / 1550
+                    </p>
+
+                    <button
+                        id="button"
+                        disabled
+                        class="bg-[#836EF9] disabled:cursor-not-allowed hover:cursor-pointer rounded-full h-14 text-2xl text-white font-semibold"
+                        >No Wallet
+                    </button>
+                </div>
+            </main>
+
+            <div
+                hidden
+                id="popup"
+                class="bg-white/80 backdrop-blur-lg border gap-4 flex flex-col w-full max-w-md border-white px-7 py-6 rounded-3xl"
+            >
+                <h1
+                    class="font-bold text-5xl text-[#200052] text-center leading-none"
+                >
+                    Wallets
+                </h1>
+
+                <div id="container" class="flex flex-col gap-4">
+                    <button
+                        hidden
+                        id="wallet"
+                        class="bg-[#836EF9] hover:cursor-pointer rounded-full h-14 text-2xl text-white font-semibold"
+                        >Connect
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
 </Layout>
